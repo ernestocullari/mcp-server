@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "fast-agent-mcp": "github: harrywang/fast-agent-mcp"
+    "fast-agent-mcp": "github:harrywang/fast-agent-mcp"
   }
 }
