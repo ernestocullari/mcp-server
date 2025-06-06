@@ -1,5 +1,5 @@
-import express from 'express';
-import { createAgent } from 'fast-agent-mcp';
+const express = require('express');
+const { createAgent } = require('fast-agent-mcp');
 
 const app = express();
 app.use(express.json());
