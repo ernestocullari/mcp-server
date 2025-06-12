@@ -2,27 +2,19 @@ import { google } from 'googleapis';
 
 export const fetchGeotargetingTool = {
   name: 'fetch-geotargeting-tool',
-  description: 'Search and analyze the June 5th Addressable Audience Curation Demographics Google Sheet for geotargeting insights',
+  description: 'Find exact ad targeting pathways by searching Description, Demographic, Grouping, then Category columns in priority order',
   parameters: {
     type: 'object',
     properties: {
       query: {
         type: 'string',
-        description: 'Search query for demographic and geotargeting data'
-      },
-      location: {
-        type: 'string',
-        description: 'Specific location or geographic area to focus on (optional)'
-      },
-      demographic: {
-        type: 'string',
-        description: 'Specific demographic criteria to filter by (optional)'
+        description: 'User\'s plain language description of their target audience'
       }
     },
     required: ['query']
   },
   
-  async execute({ query, location, demographic }) {
+  async execute({ query }) {
     try {
       // Initialize Google Sheets API
       const auth = new google.auth.GoogleAuth({
@@ -40,152 +32,167 @@ export const fetchGeotargetingTool = {
         throw new Error('GOOGLE_SHEET_ID environment variable not set');
       }
 
-      // Fetch all data from the sheet
+      // Fetch sheet data
       const response = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range: 'A:Z', // Adjust range as needed
+        range: 'A:Z',
       });
 
       const rows = response.data.values;
       if (!rows || rows.length === 0) {
         return {
           success: false,
-          message: 'No data found in the Google Sheet'
+          message: 'No data found in the targeting database'
         };
       }
 
-      // Extract headers and data
+      // Find column indices
       const headers = rows[0];
-      const data = rows.slice(1);
+      const categoryIndex = headers.findIndex(h => h.toLowerCase().includes('category'));
+      const groupingIndex = headers.findIndex(h => h.toLowerCase().includes('grouping'));
+      const demographicIndex = headers.findIndex(h => h.toLowerCase().includes('demographic'));
+      const descriptionIndex = headers.findIndex(h => h.toLowerCase().includes('description'));
 
-      // Enhanced search and matching logic
-      const searchTerms = query.toLowerCase().split(' ').filter(term => term.length > 2);
-      const locationTerms = location ? location.toLowerCase().split(' ') : [];
-      const demographicTerms = demographic ? demographic.toLowerCase().split(' ') : [];
+      if (categoryIndex === -1 || groupingIndex === -1 || demographicIndex === -1 || descriptionIndex === -1) {
+        return {
+          success: false,
+          message: 'Required columns (Category, Grouping, Demographic, Description) not found in sheet'
+        };
+      }
 
-      const scoredResults = [];
+      const data = rows.slice(1); // Skip header row
+      const userQuery = query.toLowerCase().trim();
 
-      data.forEach((row, index) => {
+      // Helper function to calculate match score
+      function calculateMatchScore(text, query) {
+        const textLower = text.toLowerCase();
         let score = 0;
-        let matchDetails = [];
-        const rowObject = {};
-
-        // Create row object with headers
-        headers.forEach((header, i) => {
-          rowObject[header] = row[i] || '';
-        });
-
-        // Search through each cell in the row
-        headers.forEach((header, colIndex) => {
-          const cellValue = (row[colIndex] || '').toString().toLowerCase();
-          
-          // Query term matching
-          searchTerms.forEach(term => {
-            if (cellValue.includes(term)) {
-              score += 5;
-              matchDetails.push(`"${term}" found in ${header}`);
-            }
-          });
-
-          // Location-specific matching (higher weight)
-          locationTerms.forEach(locTerm => {
-            if (cellValue.includes(locTerm)) {
-              score += 8;
-              matchDetails.push(`Location "${locTerm}" found in ${header}`);
-            }
-          });
-
-          // Demographic-specific matching (higher weight)
-          demographicTerms.forEach(demoTerm => {
-            if (cellValue.includes(demoTerm)) {
-              score += 8;
-              matchDetails.push(`Demographic "${demoTerm}" found in ${header}`);
-            }
-          });
-
-          // Exact phrase matching (highest score)
-          if (cellValue.includes(query.toLowerCase())) {
-            score += 12;
-            matchDetails.push(`Exact query match in ${header}`);
-          }
-        });
-
-        // Boost score for rows with geographic indicators
-        const geoKeywords = ['city', 'state', 'zip', 'county', 'region', 'area', 'district'];
-        const demoKeywords = ['age', 'income', 'household', 'population', 'gender', 'education'];
         
-        headers.forEach((header, colIndex) => {
-          const headerLower = header.toLowerCase();
-          const cellValue = (row[colIndex] || '').toString().toLowerCase();
+        // Exact phrase match (highest score)
+        if (textLower.includes(query)) {
+          score = 100;
+        } else {
+          // Word-by-word matching
+          const queryWords = query.split(' ').filter(word => word.length > 2);
+          const matchedWords = queryWords.filter(word => textLower.includes(word));
           
-          if (geoKeywords.some(keyword => headerLower.includes(keyword)) && cellValue) {
-            score += 3;
+          if (matchedWords.length > 0) {
+            score = (matchedWords.length / queryWords.length) * 80;
           }
+        }
+        
+        return score;
+      }
+
+      // Helper function to search a specific column
+      function searchColumn(columnIndex, columnName, minScore = 30) {
+        const matches = [];
+        
+        data.forEach((row, index) => {
+          const cellValue = (row[columnIndex] || '').toString();
+          const category = row[categoryIndex] || '';
+          const grouping = row[groupingIndex] || '';
+          const demographic = row[demographicIndex] || '';
+          const description = row[descriptionIndex] || '';
           
-          if (demoKeywords.some(keyword => headerLower.includes(keyword)) && cellValue) {
-            score += 3;
+          if (!cellValue.trim()) return; // Skip empty cells
+          
+          const score = calculateMatchScore(cellValue, userQuery);
+          
+          if (score >= minScore) {
+            matches.push({
+              category,
+              grouping,
+              demographic,
+              description,
+              matchedText: cellValue,
+              matchedColumn: columnName,
+              score,
+              rowIndex: index + 2
+            });
           }
         });
+        
+        return matches.sort((a, b) => b.score - a.score);
+      }
 
-        if (score > 0) {
-          scoredResults.push({
-            data: rowObject,
-            score: score,
-            matchDetails: matchDetails,
-            rowIndex: index + 2 // +2 because array is 0-indexed and we skip header row
-          });
-        }
-      });
+      // STEP 1: Search Description column first
+      let matches = searchColumn(descriptionIndex, 'Description', 30);
+      let searchSource = 'Description';
 
-      // Sort by score and get top results
-      const topResults = scoredResults
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
+      // STEP 2: If no Description matches, try Demographic column
+      if (matches.length === 0) {
+        matches = searchColumn(demographicIndex, 'Demographic', 30);
+        searchSource = 'Demographic';
+      }
 
-      if (topResults.length === 0) {
+      // STEP 3: If no Demographic matches, try Grouping column
+      if (matches.length === 0) {
+        matches = searchColumn(groupingIndex, 'Grouping', 30);
+        searchSource = 'Grouping';
+      }
+
+      // STEP 4: If no Grouping matches, try Category column
+      if (matches.length === 0) {
+        matches = searchColumn(categoryIndex, 'Category', 30);
+        searchSource = 'Category';
+      }
+
+      // STEP 5: If matches found, return top 3 pathways
+      if (matches.length > 0) {
+        const bestMatches = matches.slice(0, 3);
+        
+        const pathways = bestMatches.map((match, index) => 
+          `**Option ${index + 1}**: ${match.category} → ${match.grouping} → ${match.demographic}`
+        ).join('\n');
+
+        // Determine confidence level
+        let confidence = 'Low';
+        if (bestMatches[0].score >= 80) confidence = 'High';
+        else if (bestMatches[0].score >= 60) confidence = 'Medium';
+
         return {
           success: true,
-          message: `No relevant data found for "${query}". Try different search terms or check the sheet contents.`,
-          suggestions: [
-            'Try broader search terms',
-            'Check spelling of location names',
-            'Use demographic categories like "age", "income", "household"'
-          ]
+          matchSource: searchSource.toLowerCase(),
+          message: `Found ${bestMatches.length} targeting pathway(s) by matching "${query}" in the ${searchSource} column:`,
+          pathways: pathways,
+          confidence: confidence,
+          topMatch: {
+            category: bestMatches[0].category,
+            grouping: bestMatches[0].grouping,
+            demographic: bestMatches[0].demographic,
+            matchedText: bestMatches[0].matchedText,
+            searchedIn: searchSource
+          },
+          allMatches: bestMatches.map(match => ({
+            category: match.category,
+            grouping: match.grouping,
+            demographic: match.demographic
+          }))
         };
       }
 
-      // Format results for Artemis
-      const formattedResults = topResults.map((result, index) => {
-        const relevantData = Object.entries(result.data)
-          .filter(([key, value]) => value && value.toString().trim() !== '')
-          .slice(0, 8) // Limit to most relevant fields
-          .map(([key, value]) => `${key}: ${value}`)
-          .join('\n');
-
-        return `**Result ${index + 1} (Confidence Score: ${result.score})**\n${relevantData}\n`;
-      });
-
-      const summary = `Found ${topResults.length} relevant results for "${query}"${location ? ` in ${location}` : ''}${demographic ? ` for ${demographic} demographics` : ''}. Top match has confidence score of ${topResults[0].score}.`;
-
+      // STEP 6: No matches found anywhere
       return {
         success: true,
-        summary: summary,
-        results: formattedResults.join('\n'),
-        totalMatches: scoredResults.length,
-        query: query,
-        rawData: topResults // For debugging if needed
+        matchSource: 'none',
+        message: `No targeting pathways found for "${query}" in any column (Description, Demographic, Grouping, or Category).`,
+        pathways: '',
+        suggestions: [
+          'Try using different keywords or simpler terms',
+          'Experiment with the targeting tool to explore available options',
+          'Schedule a consultation with ernesto@artemistargeting.com for personalized assistance'
+        ],
+        searchAttempted: 'Searched all columns: Description, Demographic, Grouping, Category'
       };
 
     } catch (error) {
       console.error('Error in fetch-geotargeting-tool:', error);
       return {
         success: false,
-        message: `Error accessing Google Sheet: ${error.message}`,
-        suggestions: [
-          'Check Google Sheets API credentials',
-          'Verify GOOGLE_SHEET_ID environment variable',
-          'Ensure sheet permissions are set correctly'
-        ]
+        message: `Database error: ${error.message}`,
+        pathways: '',
+        suggestions: ['Contact ernesto@artemistargeting.com for technical support']
       };
     }
   }
